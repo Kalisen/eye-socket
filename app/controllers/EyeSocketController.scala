@@ -6,40 +6,63 @@ import akka.actor.{Actor, ActorRef, Props}
 import com.oculusvr.capi.OvrLibrary.ovrTrackingCaps._
 import com.oculusvr.capi._
 import play.api.Play.current
+import play.api.libs.EventSource
+import play.api.libs.concurrent.Promise
+import play.api.libs.iteratee.Enumerator
 import play.api.libs.json.Json
 import play.api.mvc.{Action, Controller, WebSocket}
-
+import scala.concurrent.duration._
 import scala.concurrent.Future
+import play.api.libs.concurrent.Execution.Implicits._
 
 object EyeSocketController extends Controller with OculusDevice {
 
+  /**
+   * Get Tracking data once
+   */
+  def info = Action.async {
+    printProjection()
+    Future.successful(Ok(Json.toJson(getSensorData.asArray())))
+  }
+
+  def config = Action.async {
+    Future.successful(Ok(getConfigData.toString))
+  }
+
+  /**
+   * Get Tracking data stream using web socket
+   */
   def socket = WebSocket.acceptWithActor[String, String] { request => out =>
     SensorActor.props(out)
   }
 
-  def index = Action.async {
-    var trackingState: TrackingState = null
-    trackingState = hmd.getSensorState(Hmd.getTimeInSeconds)
-
-    val pos: OvrVector3f = trackingState.HeadPose.Pose.Position
-    val quat: OvrQuaternionf = trackingState.HeadPose.Pose.Orientation
-
-    val latestData = OVRSensorData(pos.x, pos.y, pos.z, 0, 0, 0, quat.x, quat.y, quat.z, quat.w)
-
-    Future.successful(Ok(Json.toJson(latestData.asArray())))
+  /**
+   * Get Tracking data stream using server sent events
+   */
+  def sse = Action {
+    request => {
+      /** Creates enumerator and channel for Strings through Concurrent factory object
+        * for pushing data through the WebSocket */
+      val out = Enumerator.generateM {
+        val sensorData = getSensorData.toString
+        Promise.timeout(Some(sensorData), 10 milliseconds)
+      }
+      Ok.feed(out &> EventSource()).as("text/event-stream").withHeaders("Access-Control-Allow-Origin" -> "*")
+    }
   }
 
 }
 
 object SensorActor {
   def props(out: ActorRef) = Props(classOf[SensorActor], out)
+
+  def props = Props(classOf[SensorActor])
 }
 
 class SensorActor(out: ActorRef) extends Actor with OculusDevice {
 
   import context._
 
-import scala.concurrent.duration._
 
   var sensorData: OVRSensorData = OVRSensorData()
 
@@ -47,27 +70,16 @@ import scala.concurrent.duration._
     case _ =>
       sendHmdConfig()
       become(updating)
-      context.system.scheduler.scheduleOnce(1 second, self, RefreshSensorData)(context.dispatcher)
-      self ! GetSensorData
   }
 
   def updating: Receive = {
     case RefreshSensorData =>
-      val trackingState: TrackingState = hmd.getSensorState(Hmd.getTimeInSeconds)
-      val pos: OvrVector3f = trackingState.HeadPose.Pose.Position
-      val quat: OvrQuaternionf = trackingState.HeadPose.Pose.Orientation
-      val accel: OvrVector3f = trackingState.HeadPose.AngularAcceleration
-      val latestData = OVRSensorData(pos.x, pos.y, pos.z, accel.x, accel.y, accel.z, quat.x, quat.y, quat.z, quat.w)
-      sensorData = latestData
-      context.system.scheduler.scheduleOnce(10 milliseconds, self, RefreshSensorData)(context.dispatcher)
-    case _ =>
-      println(s"Sensor Data: ${sensorData.toString}")
+      sensorData = getSensorData
       out ! sensorData.toString
-      context.system.scheduler.scheduleOnce(10 milliseconds, self, GetSensorData)(context.dispatcher)
   }
 
   override def preStart() = {
-    context.system.scheduler.scheduleOnce(1 second, self, GetSensorData)(context.dispatcher)
+    context.system.scheduler.schedule(1 second, 100 millisecond, self, RefreshSensorData)(context.dispatcher)
   }
 
   override def postStop() = {
@@ -83,7 +95,7 @@ object OculusDevice {
 
   def createFirstHmd(): Hmd = {
     Hmd.initialize()
-    val hmd: Hmd = Option(Hmd.create(0)).getOrElse(Hmd.createDebug(OvrLibrary.ovrHmdType.ovrHmd_DK1))
+    val hmd: Hmd = Option(Hmd.create(0)).getOrElse(Hmd.createDebug(OvrLibrary.ovrHmdType.ovrHmd_DK2))
     hmd.configureTracking(ovrTrackingCap_Orientation | ovrTrackingCap_MagYawCorrection | ovrTrackingCap_Position, 0)
     hmd
   }
@@ -100,6 +112,44 @@ trait OculusDevice {
   import controllers.OculusDevice._
 
   val hmd: Hmd = createFirstHmd()
+
+  def getSensorData: OVRSensorData = {
+//    val trackingState: TrackingState = hmd.getSensorState(Hmd.getTimeInSeconds)
+    val trackingState: TrackingState = hmd.getSensorState(0)
+    val pos: OvrVector3f = trackingState.HeadPose.Pose.Position
+    val quat: OvrQuaternionf = trackingState.HeadPose.Pose.Orientation
+    val accel: OvrVector3f = trackingState.HeadPose.AngularAcceleration
+    OVRSensorData(pos.x, pos.y, pos.z, accel.x, accel.y, accel.z, quat.x, quat.y, quat.z, quat.w)
+  }
+
+  def getConfigData: OVRConfigData = {
+    val trackingState: TrackingState = hmd.getSensorState(Hmd.getTimeInSeconds)
+    val pos: OvrVector3f = trackingState.HeadPose.Pose.Position
+    val quat: OvrQuaternionf = trackingState.HeadPose.Pose.Orientation
+    val accel: OvrVector3f = trackingState.HeadPose.AngularAcceleration
+    println(
+      s"""
+        | hmd
+        | fovport [${hmd.DefaultEyeFov.mkString(",")}]
+        | maxEyeFov [${hmd.MaxEyeFov.mkString(",")}]
+        | """.stripMargin)
+    //OVRConfigData(fov, ipd, lensDistance, eyeToScreen, distortionValues, screenSize, screenResolution)
+    new OVRConfigData()
+  }
+
+  def printProjection(): Unit = {
+    hmd.MaxEyeFov.foreach { fov =>
+      val projection: OvrMatrix4f = Hmd.getPerspectiveProjection(fov, 0.01f, 10000.0f, true)
+      println(
+        f"""
+           |projection matrix:
+           | [${projection.M(0)}%.12f  ${projection.M(1)}%.12f  ${projection.M(2)}%.12f  ${projection.M(3)}]
+           | [${projection.M(4)}%.12f  ${projection.M(5)}%.12f  ${projection.M(6)}%.12f  ${projection.M(7)}]
+           | [${projection.M(8)}%.12f  ${projection.M(9)}%.12f  ${projection.M(10)}%.12f  ${projection.M(11)}]
+           | [${projection.M(12)}%.12f  ${projection.M(13)}%.12f  ${projection.M(14)}%.12f  ${projection.M(15)}]
+         """.stripMargin)
+    }
+  }
 }
 
 case object GetSensorData
@@ -142,18 +192,18 @@ case class OVRSensorData(id: Long = 0,
   def asArray(): Array[Double] = Array(id, px, py, pz, ax, ay, az, qx, qy, qz, qw)
 
   override def toString: String = {
-    "{ \"m\" : \"update\", \"o\" : [" + List(qx, qy, qz, qw).mkString(",") + "], \"a\" : [" + List(ax, ay, az).mkString(",") + "] }"
+    "{ \"m\" : \"update\", \"o\" : [" + List(qw, qx, qy, qz).mkString(",") + "], \"a\" : [" + List(ax, ay, az).mkString(",") + "] }"
   }
 
 }
 
-case class OVRConfigData( fov: Float = 125.871f,
-                          ipd: Float = 0.0635f,
-                          lensDistance: Float = 0.063f,
-                          eyeToScreen: Float = 0.016f,
-                          distortionValues: OvrQuaternionf = new OvrQuaternionf(1f, .22f, .24f, 0f),
-                          screenSize: OvrVector2i = new OvrVector2i(1920, 1080),
-                          screenResolution: OvrSizei = new OvrSizei(1920, 1080)) {
+case class OVRConfigData(fov: Float = 130.7f, //125.871f,
+                         ipd: Float = 0.064f,
+                         lensDistance: Float = 0.0635f,
+                         eyeToScreen: Float = 0.019f,
+                         distortionValues: OvrQuaternionf = new OvrQuaternionf(1f, .22f, .24f, 0f),
+                         screenSize: OvrVector2f = new OvrVector2f(0.12576f, 0.07074f),
+                         screenResolution: OvrSizei = new OvrSizei(1920, 1080)) {
 
   override def toString: String = "{ \"m\" : \"config\", \"fov\" : " + fov +
     ", \"interpupillaryDistance\" : " + ipd +

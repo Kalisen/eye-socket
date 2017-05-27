@@ -5,7 +5,11 @@
 # Home page
 GET        /                    controllers.EyeSocketController.socket
 
-GET        /vr                  controllers.EyeSocketController.index
+GET        /info                controllers.EyeSocketController.info
+
+GET        /config              controllers.EyeSocketController.config
+
+GET        /sse                 controllers.EyeSocketController.sse
 
 GET        /socket              controllers.EyeSocketController.socket
 
