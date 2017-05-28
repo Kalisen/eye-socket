@@ -3,7 +3,6 @@ package controllers
 import java.util.concurrent.atomic.AtomicLong
 
 import akka.actor.{Actor, ActorRef, Props}
-import com.oculusvr.capi.OvrLibrary.ovrTrackingCaps._
 import com.oculusvr.capi._
 import play.api.Play.current
 import play.api.libs.EventSource
@@ -22,7 +21,8 @@ object EyeSocketController extends Controller with OculusDevice {
    */
   def info = Action.async {
     printProjection()
-    Future.successful(Ok(Json.toJson(getSensorData.asArray())))
+    println(s"Controller: $this")
+    Future.successful(Ok(getDescriptor.toString).withHeaders((CONTENT_TYPE, "application/json")))
   }
 
   def config = Action.async {
@@ -79,7 +79,7 @@ class SensorActor(out: ActorRef) extends Actor with OculusDevice {
   }
 
   override def preStart() = {
-    context.system.scheduler.schedule(1 second, 100 millisecond, self, RefreshSensorData)(context.dispatcher)
+    context.system.scheduler.schedule(1 second, 50 millisecond, self, RefreshSensorData)(context.dispatcher)
   }
 
   override def postStop() = {
@@ -93,10 +93,11 @@ class SensorActor(out: ActorRef) extends Actor with OculusDevice {
 
 object OculusDevice {
 
+  val hmd: Hmd = createFirstHmd()
+
   def createFirstHmd(): Hmd = {
     Hmd.initialize()
-    val hmd: Hmd = Option(Hmd.create(0)).getOrElse(Hmd.createDebug(OvrLibrary.ovrHmdType.ovrHmd_DK2))
-    hmd.configureTracking(ovrTrackingCap_Orientation | ovrTrackingCap_MagYawCorrection | ovrTrackingCap_Position, 0)
+    val hmd: Hmd = Hmd.create()
     hmd
   }
 
@@ -111,35 +112,41 @@ trait OculusDevice {
 
   import controllers.OculusDevice._
 
-  val hmd: Hmd = createFirstHmd()
-
   def getSensorData: OVRSensorData = {
-//    val trackingState: TrackingState = hmd.getSensorState(Hmd.getTimeInSeconds)
-    val trackingState: TrackingState = hmd.getSensorState(0)
+    //    val trackingState: TrackingState = hmd.getSensorState(Hmd.getTimeInSeconds)
+    val trackingState: TrackingState = hmd.getTrackingState(Hmd.getTimeInSeconds, false)
     val pos: OvrVector3f = trackingState.HeadPose.Pose.Position
     val quat: OvrQuaternionf = trackingState.HeadPose.Pose.Orientation
     val accel: OvrVector3f = trackingState.HeadPose.AngularAcceleration
     OVRSensorData(pos.x, pos.y, pos.z, accel.x, accel.y, accel.z, quat.x, quat.y, quat.z, quat.w)
   }
 
+  def getDescriptor: HmdDescriptor = {
+    val descriptor = hmd.getDesc()
+    new HmdDescriptor(descriptor.Type, descriptor.padding1, new String(descriptor.ProductName), new String(descriptor.Manufacturer), descriptor.VendorId,
+      descriptor.ProductId, new String(descriptor.SerialNumber), descriptor.FirmwareMajor, descriptor.FirmwareMinor, descriptor.AvailableHmdCaps, descriptor.DefaultHmdCaps,
+      descriptor.AvailableTrackingCaps, descriptor.DefaultTrackingCaps, descriptor.DefaultEyeFov, descriptor.MaxEyeFov, descriptor.Resolution,
+      descriptor.DisplayRefreshRate, descriptor.padding2)
+  }
+
   def getConfigData: OVRConfigData = {
-    val trackingState: TrackingState = hmd.getSensorState(Hmd.getTimeInSeconds)
+    val trackingState: TrackingState = hmd.getTrackingState(Hmd.getTimeInSeconds, false)
     val pos: OvrVector3f = trackingState.HeadPose.Pose.Position
     val quat: OvrQuaternionf = trackingState.HeadPose.Pose.Orientation
     val accel: OvrVector3f = trackingState.HeadPose.AngularAcceleration
     println(
       s"""
         | hmd
-        | fovport [${hmd.DefaultEyeFov.mkString(",")}]
-        | maxEyeFov [${hmd.MaxEyeFov.mkString(",")}]
+        | fovport [${hmd.getDesc.DefaultEyeFov.mkString(",")}]
+        | maxEyeFov [${hmd.getDesc.MaxEyeFov.mkString(",")}]
         | """.stripMargin)
     //OVRConfigData(fov, ipd, lensDistance, eyeToScreen, distortionValues, screenSize, screenResolution)
     new OVRConfigData()
   }
 
   def printProjection(): Unit = {
-    hmd.MaxEyeFov.foreach { fov =>
-      val projection: OvrMatrix4f = Hmd.getPerspectiveProjection(fov, 0.01f, 10000.0f, true)
+    hmd.getDesc.MaxEyeFov.foreach { fov =>
+      val projection: OvrMatrix4f = Hmd.getPerspectiveProjection(fov, 0.01f, 10000.0f, 1)
       println(
         f"""
            |projection matrix:
@@ -215,4 +222,44 @@ case class OVRConfigData(fov: Float = 130.7f, //125.871f,
 
 }
 
-
+case class HmdDescriptor(hmdType: Int,
+                         padding1: Array[Byte],
+                         productName: String,
+                         manufacturer: String,
+                         vendorId: Short,
+                         productId: Short,
+                         serialNumber: String,
+                         firmwareMajor: Short,
+                         firmwareMinor: Short,
+                         availableHmdCaps: Int,
+                         defaultHmdCaps: Int,
+                         availableTrackingCaps: Int,
+                         defaultTrackingCaps: Int,
+                         defaultEyeFov: Array[FovPort],
+                         maxEyeFov: Array[FovPort],
+                         resolution: OvrSizei,
+                         displayRefreshRate: Float,
+                         padding2: Array[Byte]
+                        ) {
+  override def toString: String =
+    s"""{
+       |"hmdType": $hmdType,
+       |"padding1": [${padding1.mkString(",")}],
+       |"productName": "$productName",
+       |"manufacturer": "$manufacturer",
+       |"vendorId": $vendorId,
+       |"productId": $productId,
+       |"serialNumber": "$serialNumber",
+       |"firmwareMajor": $firmwareMajor,
+       |"firmwareMinor": $firmwareMinor,
+       |"availableHmdCaps": $availableHmdCaps,
+       |"defaultHmdCaps": $defaultHmdCaps,
+       |"availableTrackingCaps": $availableTrackingCaps,
+       |"defaultTrackingCaps": $defaultTrackingCaps,
+       |"defaultEyeFov": "Array[FovPort]",
+       |"maxEyeFov": "Array[FovPort]",
+       |"resolution": "${resolution.w}x${resolution.h}",
+       |"displayRefreshRate": $displayRefreshRate,
+       |"padding2": [${padding2.mkString(",")}],
+       | }""".stripMargin
+}
